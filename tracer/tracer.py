@@ -18,6 +18,7 @@ from simuvex import s_cc
 import logging
 
 l = logging.getLogger("tracer.Tracer")
+l.setLevel('DEBUG')
 # global writable attribute used for specifying cache procedures
 GlobalCacheManager = None
 
@@ -52,7 +53,7 @@ class Tracer(object):
                  preconstrain_flag=True, resiliency=True, chroot=None,
                  add_options=None, remove_options=None, trim_history=True,
                  project=None, dump_syscall=False, dump_cache=True,
-                 max_size = None):
+                 max_size = None, edit_pov=None):
         """
         :param binary: path to the binary to be traced
         :param input: concrete input string to feed to binary
@@ -139,6 +140,9 @@ class Tracer(object):
         # a PoV was provided
         if self.pov_file is not None:
             self.pov_file = TracerPoV(self.pov_file)
+            if not edit_pov is None:
+                index, inserted_string = edit_pov
+                self.pov_file.append_write(index, inserted_string)
             self.pov = True
         else:
             self.pov = False
@@ -165,6 +169,7 @@ class Tracer(object):
 
         self.crash_type = None
 
+        self.exploit_addr = None
         # CGC flag data
         self.cgc_flag_bytes = [claripy.BVS("cgc-flag-byte-%d" % i, 8) for i in xrange(0x1000)]
 
@@ -205,7 +210,7 @@ class Tracer(object):
         # this will be set by _prepare_paths
         self.unicorn_enabled = False
 
-        # initilize the syscall statistics if the flag is on
+        # initialize the syscall statistics if the flag is on
         self._dump_syscall = dump_syscall
         if self._dump_syscall:
             self._syscall = []
@@ -214,6 +219,65 @@ class Tracer(object):
 
         # this is used to track constrained addresses
         self._address_concretization = []
+
+        self.last_p_qemu = 0
+        self.last_p_se = 0
+
+    def _current_path(self, pg):
+        if len(pg.active) == 1:
+            return pg.active[0]
+        elif 'crashed' in pg.stashes and len(pg.crashed) == 1:
+            return pg.crashed[0]
+        else:
+            return None
+
+    def _align(self, trace_qemu, trace_se, p_qemu, p_se):
+        """
+        Only get called when self.no_follow is False
+        """
+        while p_se < len(trace_se) and p_qemu < len(trace_qemu):
+            if trace_qemu[p_qemu] == trace_se[p_se]:
+                p_qemu += 1
+                p_se += 1
+            else:
+                # we assume this is because qemu breaks a bbl into multiple
+                # addresses due to the translate block size limitation
+                block_start = trace_qemu[p_qemu - 1]
+                block_end = block_start
+                ss = block_start
+                while True:
+                    block = self._p.factory.block(ss)
+                    block_end += block.size
+                    if block.vex.jumpkind == 'Ijk_Boring' and \
+                            block.vex.statements[-1].tag != 'Ist_exit':
+                        ss = block_end
+                    else:
+                        break
+                while trace_qemu[p_qemu] > block_start and \
+                        trace_qemu[p_qemu] < block_end:
+                    p_qemu += 1
+                assert(trace_qemu[p_qemu] == trace_se[p_se])
+                p_qemu += 1
+                p_se += 1
+        if p_se >= len(trace_se):
+            self.last_p_qemu = p_qemu
+            self.last_p_se = p_se
+            # We succesfully align to the end of the current SE trace
+            return True
+        else:
+            # We fail to align to the end of the current SE trace
+            l.error('We fail to align to the end of the current SE trace')
+            return False
+
+    def _is_aligned(self, trace_qemu, trace_se, p_qemu, p_se,
+            previous_is_syscall):
+        if p_qemu == 0 and p_se == 0:
+            return True
+        if trace_qemu[p_qemu-1] == trace_se[p_se-1]:
+            return True
+        else:
+            return previous_is_syscall and \
+                    trace_qemu[p_qemu-1] == trace_se[p_se-2]
 
 # EXPOSED
 
@@ -228,6 +292,7 @@ class Tracer(object):
                  remove_preconstraints method.
         """
 
+        current = self._current_path(self.path_group)
         while len(self.path_group.active) == 1:
             current = self.path_group.active[0]
 
@@ -238,28 +303,76 @@ class Tracer(object):
             except AttributeError:
                 pass
 
+            # follow the qemu trace
             if not self.no_follow:
 
                 # expected behavor, the dynamic trace and symbolic trace hit
                 # the same basic block
+                # the qemu trace is over, so we want to wrap up as well
                 if self.bb_cnt >= len(self.trace):
                     return self.path_group
 
-                if current.addr == self.trace[self.bb_cnt]:
+                try:
+                    # We meant current.addr_trace.hardcopy[-1], but hardcopy is too expensive.
+                    last_addr = next(reversed(current.addr_trace))
+                except StopIteration:
+                    last_addr = None
+                # current.addr == self.trace[self.bb_cnt - 1]
+                if current.addr == self.trace[self.bb_cnt] or \
+                        last_addr == self.trace[self.bb_cnt-1]:
+                    l.debug("all good at %x, continue", current.addr)
+                    l.debug(current)
+                    self.last_p_qemu = self.bb_cnt
+                    # len(current.addr_trace) is too expensive
+                    self.last_p_se = current.history.length + current.history.extra_length
                     self.bb_cnt += 1
+                # SE must stop for system calls
+                elif current.previous_run is not None and \
+                        getattr(current.previous_run, 'IS_SYSCALL', None):
+                    # And we skip the system call
+                    self.last_p_se += 1
+                else:
+                    if self._align(self.trace, current.addr_trace.hardcopy,
+                        self.last_p_qemu, self.last_p_se):
+                        l.debug('successfully align, keep going')
+                        self.bb_cnt = self.last_p_qemu + 1
+                    else:
+                        l.error('cannot align')
+                        import ipdb; ipdb.set_trace()
+                        l.error(
+                            "the dynamic trace and the symbolic trace disagreed"
+                            )
+                        l.error("[%s] dynamic [0x%x], symbolic [0x%x]",
+                                self.binary,
+                                self.trace[self.bb_cnt-1],
+                                current.addr)
+                        l.error("inputs was %r", self.input)
+                        if self.resiliency:
+                            l.error("TracerMisfollowError encountered")
+                            l.warning("entering no follow mode")
+                            self.no_follow = True
+                        else:
+                            raise TracerMisfollowError
 
+
+                # handle system call
                 # angr steps through the same basic block twice when a syscall
                 # occurs
-                elif current.addr == self.previous_addr or \
-                        self._p._simos.syscall_table.get_by_addr(self.previous_addr) is not None:
-                    pass
-                elif current.jumpkind.startswith("Ijk_Sys"):
-                    self.bb_cnt += 1
+                #if current.addr == self.previous_addr or \
+                #        self._p.is_hooked(self.previous_addr) and \
+                #        self._p.hooked_by(self.previous_addr).IS_SYSCALL:
+                #    l.error('THIS SHOULD NOT OCCUR')
+                #    self.bb_cnt += 2
+                #    self.last_p_qemu = self.bb_cnt - 1
+                #    self.last_p_se = len(current.addr_trace)
+                #    import ipdb; ipdb.set_trace()
+                #    pass
 
                 # handle library calls and simprocedures
-                elif self._p.is_hooked(current.addr) or \
-                        self._p._simos.syscall_table.get_by_addr(current.addr) is not None \
+                """
+                if self._p.is_hooked(current.addr) \
                         or not self._address_in_binary(current.addr):
+                    l.debug('handle library calls and simprocedure')
                     # are we going to be jumping through the PLT stub?
                     # if so we need to take special care
                     r_plt = self._p.loader.main_bin.reverse_plt
@@ -268,7 +381,8 @@ class Tracer(object):
                             and self.previous.addr in r_plt:
                         self.bb_cnt += 2
                         self._resolved.add(current.addr)
-
+                    self.last_p_qemu = self.bb_cnt - 1
+                    self.last_p_se = len(current.addr_trace)
                 # handle hooked functions
                 # we use current._project since it seems to be different than self._p
                 elif current._project.is_hooked(self.previous_addr) and self.previous_addr in self._hooks:
@@ -284,24 +398,20 @@ class Tracer(object):
                     l.debug("bb_cnt after the correction %d", self.bb_cnt)
                     if self.bb_cnt >= len(self.trace):
                         return self.path_group
+                    self.last_p_qemu = self.bb_cnt - 1
+                    self.last_p_se = len(current.addr_trace)
 
-                else:
-                    l.error(
-                        "the dynamic trace and the symbolic trace disagreed"
-                           )
+                if not self._is_aligned(self.trace, current.addr_trace.hardcopy,
+                        self.last_p_qemu, self.last_p_se,
+                        (current.previous_run is not None and
+                            getattr(current.previous_run, 'IS_SYSCALL', None))):
+                    l.error('disagree')
+                    import ipdb; ipdb.set_trace()
+                """
 
-                    l.error("[%s] dynamic [0x%x], symbolic [0x%x]",
-                            self.binary,
-                            self.trace[self.bb_cnt],
-                            current.addr)
-
-                    l.error("inputs was %r", self.input)
-                    if self.resiliency:
-                        l.error("TracerMisfollowError encountered")
-                        l.warning("entering no follow mode")
-                        self.no_follow = True
-                    else:
-                        raise TracerMisfollowError
+            # ============= End of setting up the following
+            # At this point, we must guarantee that
+            # self.trace[self.bb_cnt-1] == current.addr
 
             # shouldn't need to copy
             self.previous = current
@@ -339,7 +449,7 @@ class Tracer(object):
 
             self.prev_path_group = self.path_group
             self.path_group = self.path_group.step(size=bbl_max_bytes)
-        
+
             if self.crash_type == EXEC_STACK:
                 self.path_group = self.path_group.stash(from_stash='active',
                         to_stash='crashed')
@@ -366,7 +476,7 @@ class Tracer(object):
                     if len(tpg.active) == 0:
                         self.path_group = tpg
                         return self.path_group
-
+        # =================== end of while =====================
         # if we stepped to a point where there are no active paths,
         # return the path_group
         if len(self.path_group.active) == 0:
@@ -378,6 +488,8 @@ class Tracer(object):
         # or if a split occurs in a library routine
         a_paths = self.path_group.active
 
+        # if we do not follow qemu or all active paths are pointing outside the
+        # binary
         if self.no_follow or all(map(
                 lambda p: not self._address_in_binary(p.addr), a_paths
                 )):
@@ -485,12 +597,14 @@ class Tracer(object):
 
         # keep calling next_branch until it quits
         branches = None
-        while (branches is None or len(branches.active)) and self.bb_cnt < len(self.trace):
+        while (branches is None or not self._current_path(branches) is None) and self.bb_cnt < len(self.trace):
             branches = self.next_branch()
 
             # if we spot a crashed path in crash mode return the goods
             if self.crash_mode and 'crashed' in branches.stashes:
                 if self.crash_type == EXEC_STACK:
+                    self.path = self.path_group.crashed[0]
+                    self.final_state = self.crash_state
                     return self.path_group.crashed[0], self.crash_state
                 elif self.crash_type == QEMU_CRASH:
                     last_block = self.trace[self.bb_cnt - 1]
@@ -544,8 +658,8 @@ class Tracer(object):
                 self.remove_preconstraints(self.previous)
                 self.previous._run = None
 
-                l.debug("reconstraining... ")
-                self.reconstrain(self.previous)
+                #l.debug("reconstraining... ")
+                #self.reconstrain(self.previous)
 
                 l.debug("final step...")
                 self.previous.step()
@@ -716,6 +830,7 @@ class Tracer(object):
         '''
 
         lname = tempfile.mktemp(dir="/dev/shm/", prefix="tracer-log-")
+        l.debug('log file name %s' % lname)
         args = [self.tracer_qemu_path]
 
         if self.seed is not None:
@@ -753,12 +868,13 @@ class Tracer(object):
                 for write in self.pov_file.writes:
                     out_s.send(write)
                     time.sleep(.01)
+                    l.debug('sending %s' % write)
             ret = p.wait()
             # did a crash occur?
             if ret < 0:
                 if abs(ret) == signal.SIGSEGV or abs(ret) == signal.SIGILL:
-                    l.info("input caused a crash (signal %d)\
-                            during dynamic tracing", abs(ret))
+                    l.info("input caused a crash (signal %d) " \
+                            "during dynamic tracing", abs(ret))
                     l.info("entering crash mode")
                     self.crash_mode = True
 
@@ -804,6 +920,7 @@ class Tracer(object):
         if not self.preconstrain_input:
             return
 
+        self.input_preconstraints = []
         repair_entry_state_opts = False
         if so.TRACK_ACTION_HISTORY in entry_state.options:
             repair_entry_state_opts = True
@@ -818,6 +935,7 @@ class Tracer(object):
                     c = v == b_bvv
                     self.variable_map[list(v.variables)[0]] = c
                     self.preconstraints.append(c)
+                    self.input_preconstraints.append(c)
                     if so.REPLACEMENT_SOLVER in entry_state.options:
                         entry_state.se._solver.add_replacement(v, b_bvv, invalidate_cache=False)
 
@@ -833,6 +951,7 @@ class Tracer(object):
                 # add the constraint for reconstraining later
                 self.variable_map[list(v.variables)[0]] = c
                 self.preconstraints.append(c)
+                self.input_preconstraints.append(c)
                 if so.REPLACEMENT_SOLVER in entry_state.options:
                     entry_state.se._solver.add_replacement(v, b_bvv, invalidate_cache=False)
 
@@ -1033,10 +1152,14 @@ class Tracer(object):
             self._syscall.append(d)
 
     def check_stack(self, state):
+        # l.debug("checking %s" % state.ip)
         if state.memory.load(state.ip, state.ip.length).symbolic:
             l.debug("executing input-related code")
             self.crash_type = EXEC_STACK
             self.crash_state = state
+            if self.exploit_addr is None:
+                # TODO: is this the correct way to get the value of BVV?
+                self.exploit_addr = state.ip.args[0]
 
     def _linux_prepare_paths(self):
         '''
