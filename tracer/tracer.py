@@ -18,7 +18,7 @@ from simuvex import s_cc
 import logging
 
 l = logging.getLogger("tracer.Tracer")
-l.setLevel('DEBUG')
+#l.setLevel('DEBUG')
 # global writable attribute used for specifying cache procedures
 GlobalCacheManager = None
 
@@ -597,9 +597,14 @@ class Tracer(object):
 
         # keep calling next_branch until it quits
         branches = None
+        self.min_esp = None
         while (branches is None or not self._current_path(branches) is None) and self.bb_cnt < len(self.trace):
             branches = self.next_branch()
 
+            # update the stack bottom
+            if len(self.path_group.active) > 0 and (self.min_esp is None or
+                    self.min_esp > self.path_group.active[0].state.regs.esp.args[0]):
+                self.min_esp = self.path_group.active[0].state.regs.esp.args[0]
             # if we spot a crashed path in crash mode return the goods
             if self.crash_mode and 'crashed' in branches.stashes:
                 if self.crash_type == EXEC_STACK:
