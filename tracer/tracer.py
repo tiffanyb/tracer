@@ -223,6 +223,16 @@ class Tracer(object):
         self.last_p_qemu = 0
         self.last_p_se = 0
 
+        # this is used to record the constraints and the corresponding
+        # instructions.
+        self.constraints_history = {}
+        # the flag for recording the constraints
+        self.record_constraints = True
+
+        # the constraints added when the control flow is altered to
+        # user-input data.
+        self.exploit_constraints = None
+
     def _current_path(self, pg):
         if len(pg.active) == 1:
             return pg.active[0]
@@ -327,8 +337,11 @@ class Tracer(object):
                     self.last_p_se = current.history.length + current.history.extra_length
                     self.bb_cnt += 1
                 # SE must stop for system calls
-                elif current.previous_run is not None and \
-                        getattr(current.previous_run, 'IS_SYSCALL', None):
+                # elif current.previous_run is not None and \
+                        # getattr(current.previous_run, 'IS_SYSCALL', None):
+                elif current.previous_run is not None and (
+                        'SYSCALL' in current.previous_run.description
+                        or 'syscall' in current.previous_run.description):
                     # And we skip the system call
                     self.last_p_se += 1
                 else:
@@ -338,7 +351,6 @@ class Tracer(object):
                         self.bb_cnt = self.last_p_qemu + 1
                     else:
                         l.error('cannot align')
-                        import ipdb; ipdb.set_trace()
                         l.error(
                             "the dynamic trace and the symbolic trace disagreed"
                             )
@@ -584,6 +596,9 @@ class Tracer(object):
                 add_constraints = True
                 break
         state.inspect.address_concretization_add_constraints = add_constraints
+
+    def stop_record_constraints(self):
+        self.record_constraints = False
 
     def run(self, constrained_addrs=None):
         '''
@@ -1133,6 +1148,11 @@ class Tracer(object):
             entry_state.inspect.b('syscall', when=simuvex.BP_BEFORE, action=self.syscall)
         entry_state.inspect.b('path_step', when=simuvex.BP_AFTER,
                 action=self.check_stack)
+
+        # record the instructions which adds the constraints
+        entry_state.inspect.b('constraints', when=simuvex.BP_AFTER,
+                action=self._record)
+
         pg = project.factory.path_group(
             entry_state,
             immutable=True,
@@ -1165,6 +1185,17 @@ class Tracer(object):
             if self.exploit_addr is None:
                 # TODO: is this the correct way to get the value of BVV?
                 self.exploit_addr = state.ip.args[0]
+            self.exploit_constraints = state.inspect.added_constraints
+
+    def _record(self, state):
+        if self.record_constraints:
+            key, value = state.inspect.added_constraints, state.ip
+            if not key in self.constraints_history:
+                self.constraints_history[key] = []
+            if value.symbolic == False:
+                self.constraints_history[key].append(value.args[0])
+            else:
+                self.constraints_history[key].append(value)
 
     def _linux_prepare_paths(self):
         '''
