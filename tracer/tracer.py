@@ -233,6 +233,8 @@ class Tracer(object):
         # user-input data.
         self.exploit_constraints = None
 
+        self.add_symbol_history = []
+
     def _current_path(self, pg):
         if len(pg.active) == 1:
             return pg.active[0]
@@ -365,61 +367,6 @@ class Tracer(object):
                             self.no_follow = True
                         else:
                             raise TracerMisfollowError
-
-
-                # handle system call
-                # angr steps through the same basic block twice when a syscall
-                # occurs
-                #if current.addr == self.previous_addr or \
-                #        self._p.is_hooked(self.previous_addr) and \
-                #        self._p.hooked_by(self.previous_addr).IS_SYSCALL:
-                #    l.error('THIS SHOULD NOT OCCUR')
-                #    self.bb_cnt += 2
-                #    self.last_p_qemu = self.bb_cnt - 1
-                #    self.last_p_se = len(current.addr_trace)
-                #    import ipdb; ipdb.set_trace()
-                #    pass
-
-                # handle library calls and simprocedures
-                """
-                if self._p.is_hooked(current.addr) \
-                        or not self._address_in_binary(current.addr):
-                    l.debug('handle library calls and simprocedure')
-                    # are we going to be jumping through the PLT stub?
-                    # if so we need to take special care
-                    r_plt = self._p.loader.main_bin.reverse_plt
-                    if current.addr not in self._resolved \
-                            and self.previous is not None \
-                            and self.previous.addr in r_plt:
-                        self.bb_cnt += 2
-                        self._resolved.add(current.addr)
-                    self.last_p_qemu = self.bb_cnt - 1
-                    self.last_p_se = len(current.addr_trace)
-                # handle hooked functions
-                # we use current._project since it seems to be different than self._p
-                elif current._project.is_hooked(self.previous_addr) and self.previous_addr in self._hooks:
-                    l.debug("ending hook for %s", current._project.hooked_by(self.previous_addr))
-                    l.debug("previous addr %#x", self.previous_addr)
-                    l.debug("bb_cnt %d", self.bb_cnt)
-                    # we need step to the return
-                    current_addr = current.addr
-                    while current_addr != self.trace[self.bb_cnt] and self.bb_cnt < len(self.trace):
-                        self.bb_cnt += 1
-                    # step 1 more for the normal step that would happen
-                    self.bb_cnt += 1
-                    l.debug("bb_cnt after the correction %d", self.bb_cnt)
-                    if self.bb_cnt >= len(self.trace):
-                        return self.path_group
-                    self.last_p_qemu = self.bb_cnt - 1
-                    self.last_p_se = len(current.addr_trace)
-
-                if not self._is_aligned(self.trace, current.addr_trace.hardcopy,
-                        self.last_p_qemu, self.last_p_se,
-                        (current.previous_run is not None and
-                            getattr(current.previous_run, 'IS_SYSCALL', None))):
-                    l.error('disagree')
-                    import ipdb; ipdb.set_trace()
-                """
 
             # ============= End of setting up the following
             # At this point, we must guarantee that
@@ -691,6 +638,7 @@ class Tracer(object):
                 successors = self.previous.next_run.successors
                 successors += self.previous.next_run.unconstrained_successors
                 state = successors[0]
+
 
                 l.debug("tracing done!")
                 self.final_state = state
@@ -1153,6 +1101,10 @@ class Tracer(object):
         entry_state.inspect.b('constraints', when=simuvex.BP_AFTER,
                 action=self._record)
 
+        # record the instructions that add new symbolic value
+        entry_state.inspect.b('symbolic_variable',
+                when=simuvex.BP_AFTER,
+                action=self._hook_symbolic_variable)
         pg = project.factory.path_group(
             entry_state,
             immutable=True,
@@ -1196,6 +1148,9 @@ class Tracer(object):
                 self.constraints_history[key].append(value.args[0])
             else:
                 self.constraints_history[key].append(value)
+
+    def _hook_symbolic_variable(self, state):
+        self.add_symbol_history.append(self.trace[self.last_p_qemu-1])
 
     def _linux_prepare_paths(self):
         '''
