@@ -86,7 +86,8 @@ class Tracer(object):
         self.preconstrain_flag = preconstrain_flag
         self.simprocedures = {} if simprocedures is None else simprocedures
         self._hooks = {} if hooks is None else hooks
-        self.input_max_size = max_size or len(input)
+        self.input_max_size = max_size
+        # self.input_max_size = max_size or len(input)
 
         for h in self._hooks:
             l.debug("Hooking %#x -> %s", h, self._hooks[h].__name__)
@@ -454,7 +455,7 @@ class Tracer(object):
                 )):
             self.path_group = self.path_group.prune(to_stash='missed')
         else:
-            l.debug("bb %d / %d", self.bb_cnt, len(self.trace))
+            l.info("bb %d / %d", self.bb_cnt, len(self.trace))
             self.path_group = self.path_group.stash_not_addr(
                                            self.trace[self.bb_cnt],
                                            to_stash='missed')
@@ -477,6 +478,7 @@ class Tracer(object):
         if not self.path_group.active[0].state.se.satisfiable():
             l.warning("detected small discrepency between qemu and angr, "
                     "attempting to fix known cases")
+            import ipdb; ipdb.set_trace()
             # did our missed branch try to go back to a rep?
             target = self.path_group.missed[0].addr
             if self._p.arch.name == 'X86' or self._p.arch.name == 'AMD64':
@@ -567,6 +569,21 @@ class Tracer(object):
             if len(self.path_group.active) > 0 and (self.min_esp is None or
                     self.min_esp > self.path_group.active[0].state.regs.esp.args[0]):
                 self.min_esp = self.path_group.active[0].state.regs.esp.args[0]
+
+            # when the only path with symbolic ip, the path will be
+            # catergorized to unconstrained. We need to save it out.
+            if len(branches.active) == 0 and \
+                    'unconstrained' in branches.stashes and \
+                    len(branches.unconstrained) > 0 and \
+                    branches.unconstrained[0].state.ip.symbolic:
+                self.crash_state = branches.unconstrained[0].state
+                self.path = branches.unconstrained[0]
+                self.exploit_constraints = [(self.crash_state.ip ==
+                        self.trace[self.bb_cnt])]
+                self.crash_state.add_constraints(self.exploit_constraints[0])
+                self.final_state = self.crash_state
+                return self.path, self.crash_state
+
             # if we spot a crashed path in crash mode return the goods
             if self.crash_mode and 'crashed' in branches.stashes:
                 if self.crash_type == EXEC_STACK:
@@ -911,7 +928,6 @@ class Tracer(object):
 
         else:  # not a PoV, just raw input
             stdin = entry_state.posix.get_file(0)
-
             for b in self.input:
                 v = stdin.read_from(1)
                 b_bvv = entry_state.se.BVV(b)
@@ -1094,7 +1110,7 @@ class Tracer(object):
 
         if self._dump_syscall:
             entry_state.inspect.b('syscall', when=simuvex.BP_BEFORE, action=self.syscall)
-        entry_state.inspect.b('path_step', when=simuvex.BP_AFTER,
+        entry_state.inspect.b('path_step', when=simuvex.BP_BEFORE,
                 action=self.check_stack)
 
         # record the instructions which adds the constraints
@@ -1125,13 +1141,18 @@ class Tracer(object):
             d = {'addr': syscall_addr}
             for i in xrange(4):
                 d['arg_%d' % i] = args[i]
-                d['arg_%d_symbolic' % i] = args[i].ast.symbolic
+                d['arg_%d_symbolic' % i] = args[i].symbolic
             self._syscall.append(d)
+        if syscall_addr == 0xa000018:
+            args = s_cc.SyscallCC['X86']['CGC'](self._p.arch).get_args(state, 4)
+            length = args[2].args[0]
+            for _ in xrange(length):
+                self.add_symbol_history.append(self.last_p_qemu-1)
 
     def check_stack(self, state):
-        # l.debug("checking %s" % state.ip)
+        l.debug("checking %s" % state.ip)
         if state.memory.load(state.ip, state.ip.length).symbolic:
-            l.debug("executing input-related code")
+            l.info("executing input-related code")
             self.crash_type = EXEC_STACK
             self.crash_state = state
             if self.exploit_addr is None:
@@ -1150,7 +1171,11 @@ class Tracer(object):
                 self.constraints_history[key].append(value)
 
     def _hook_symbolic_variable(self, state):
-        self.add_symbol_history.append(self.trace[self.last_p_qemu-1])
+        l.info('%d %s' % (self.last_p_qemu-1,
+            state.inspect.symbolic_name))
+        self.input_preconstraints.append(state.inspect.symbolic_expr)
+        #if not self.last_p_qemu - 1 in self.add_symbol_history:
+        #    self.add_symbol_history.append(self.last_p_qemu-1)
 
     def _linux_prepare_paths(self):
         '''
