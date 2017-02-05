@@ -906,6 +906,7 @@ class Tracer(object):
             return
 
         self.input_preconstraints = []
+        self.input_symbols = []
         repair_entry_state_opts = False
         if so.TRACK_ACTION_HISTORY in entry_state.options:
             repair_entry_state_opts = True
@@ -1110,7 +1111,7 @@ class Tracer(object):
 
         if self._dump_syscall:
             entry_state.inspect.b('syscall', when=simuvex.BP_BEFORE, action=self.syscall)
-        entry_state.inspect.b('path_step', when=simuvex.BP_BEFORE,
+        entry_state.inspect.b('path_step', when=simuvex.BP_AFTER,
                 action=self.check_stack)
 
         # record the instructions which adds the constraints
@@ -1173,7 +1174,7 @@ class Tracer(object):
     def _hook_symbolic_variable(self, state):
         l.info('%d %s' % (self.last_p_qemu-1,
             state.inspect.symbolic_name))
-        self.input_preconstraints.append(state.inspect.symbolic_expr)
+        self.input_symbols.append(state.inspect.symbolic_expr)
         #if not self.last_p_qemu - 1 in self.add_symbol_history:
         #    self.add_symbol_history.append(self.last_p_qemu-1)
 
