@@ -216,13 +216,13 @@ class Tracer(object):
         if self._dump_syscall:
             self._syscall = []
 
+        self.last_p_qemu = 0
+        self.last_p_se = 0
         self.path_group = self._prepare_paths()
 
         # this is used to track constrained addresses
         self._address_concretization = []
 
-        self.last_p_qemu = 0
-        self.last_p_se = 0
 
         # this is used to record the constraints and the corresponding
         # instructions.
