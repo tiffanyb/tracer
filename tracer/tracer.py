@@ -478,7 +478,6 @@ class Tracer(object):
         if not self.path_group.active[0].state.se.satisfiable():
             l.warning("detected small discrepency between qemu and angr, "
                     "attempting to fix known cases")
-            import ipdb; ipdb.set_trace()
             # did our missed branch try to go back to a rep?
             target = self.path_group.missed[0].addr
             if self._p.arch.name == 'X86' or self._p.arch.name == 'AMD64':
@@ -572,12 +571,14 @@ class Tracer(object):
 
             # when the only path with symbolic ip, the path will be
             # catergorized to unconstrained. We need to save it out.
+            # if self.bb_cnt >= 7081: import ipdb; ipdb.set_trace()
             if len(branches.active) == 0 and \
                     'unconstrained' in branches.stashes and \
                     len(branches.unconstrained) > 0 and \
                     branches.unconstrained[0].state.ip.symbolic:
                 self.crash_state = branches.unconstrained[0].state
                 self.path = branches.unconstrained[0]
+                self.ip_symbols = self.crash_state.ip
                 self.exploit_constraints = [(self.crash_state.ip ==
                         self.trace[self.bb_cnt])]
                 self.crash_state.add_constraints(self.exploit_constraints[0])
@@ -589,6 +590,7 @@ class Tracer(object):
                 if self.crash_type == EXEC_STACK:
                     self.path = self.path_group.crashed[0]
                     self.final_state = self.crash_state
+                    self.ip_symbols = self.path.previous_run.successors[0].ip
                     return self.path_group.crashed[0], self.crash_state
                 elif self.crash_type == QEMU_CRASH:
                     last_block = self.trace[self.bb_cnt - 1]
@@ -907,6 +909,7 @@ class Tracer(object):
 
         self.input_preconstraints = []
         self.input_symbols = []
+        self.ip_symbols = None
         repair_entry_state_opts = False
         if so.TRACK_ACTION_HISTORY in entry_state.options:
             repair_entry_state_opts = True
@@ -1163,13 +1166,14 @@ class Tracer(object):
 
     def _record(self, state):
         if self.record_constraints:
-            key, value = state.inspect.added_constraints, state.ip
-            if not key in self.constraints_history:
-                self.constraints_history[key] = []
-            if value.symbolic == False:
-                self.constraints_history[key].append(value.args[0])
-            else:
-                self.constraints_history[key].append(value)
+            constraints, addr = state.inspect.added_constraints, state.ip
+            for c in constraints:
+                if not c in self.constraints_history:
+                    self.constraints_history[c] = []
+                if addr.symbolic:
+                    self.constraints_history[c].append(addr)
+                else:
+                    self.constraints_history[c].append(addr.args[0])
 
     def _hook_symbolic_variable(self, state):
         l.info('%d %s' % (self.last_p_qemu-1,
