@@ -20,7 +20,7 @@ class CacheManager(object):
         raise NotImplementedError("subclasses must implement this method")
 
     def _prepare_cache_data(self, simstate):
-
+        # import ipdb; ipdb.set_trace()
         state = self.tracer.previous.state
 
         ds = None

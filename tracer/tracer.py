@@ -86,8 +86,7 @@ class Tracer(object):
         self.preconstrain_flag = preconstrain_flag
         self.simprocedures = {} if simprocedures is None else simprocedures
         self._hooks = {} if hooks is None else hooks
-        self.input_max_size = max_size
-        # self.input_max_size = max_size or len(input)
+        self.input_max_size = max_size or len(input)
 
         for h in self._hooks:
             l.debug("Hooking %#x -> %s", h, self._hooks[h].__name__)
@@ -478,6 +477,7 @@ class Tracer(object):
         if not self.path_group.active[0].state.se.satisfiable():
             l.warning("detected small discrepency between qemu and angr, "
                     "attempting to fix known cases")
+            import ipdb; ipdb.set_trace()
             # did our missed branch try to go back to a rep?
             target = self.path_group.missed[0].addr
             if self._p.arch.name == 'X86' or self._p.arch.name == 'AMD64':
@@ -641,7 +641,8 @@ class Tracer(object):
 
                 # remove the preconstraints
                 l.debug("removing preconstraints")
-                self.remove_preconstraints(self.previous)
+                self.remove_preconstraints(self.previous,
+                        self.preconstraints)
                 self.previous._run = None
 
                 #l.debug("reconstraining... ")
@@ -675,7 +676,7 @@ class Tracer(object):
         self.path = all_paths[0]
         return all_paths[0], None
 
-    def remove_preconstraints(self, path, to_composite_solver=True, simplify=True):
+    def remove_preconstraints(self, path, constraints, to_composite_solver=True, simplify=True):
 
         if not (self.preconstrain_input or self.preconstrain_flag):
             return
@@ -683,7 +684,7 @@ class Tracer(object):
         # cache key set creation
         precon_cache_keys = set()
 
-        for con in self.preconstraints:
+        for con in constraints:
             precon_cache_keys.add(con.cache_key)
 
         new_constraints = filter(lambda x: x.cache_key not in precon_cache_keys, path.state.se.constraints)
@@ -932,6 +933,7 @@ class Tracer(object):
 
         else:  # not a PoV, just raw input
             stdin = entry_state.posix.get_file(0)
+            # import ipdb; ipdb.set_trace()
             for b in self.input:
                 v = stdin.read_from(1)
                 b_bvv = entry_state.se.BVV(b)
@@ -1125,6 +1127,11 @@ class Tracer(object):
         entry_state.inspect.b('symbolic_variable',
                 when=simuvex.BP_AFTER,
                 action=self._hook_symbolic_variable)
+
+        entry_state.inspect.b('mem_write',
+                mem_write_address=0xbaaaadd6,
+                action=self._hook_buffer_write)
+
         pg = project.factory.path_group(
             entry_state,
             immutable=True,
@@ -1147,9 +1154,10 @@ class Tracer(object):
                 d['arg_%d' % i] = args[i]
                 d['arg_%d_symbolic' % i] = args[i].symbolic
             self._syscall.append(d)
-        if syscall_addr == 0xa000018:
+        if syscall_addr == 0xa000018 or syscall_addr == 0xb000018:
             args = s_cc.SyscallCC['X86']['CGC'](self._p.arch).get_args(state, 4)
             length = args[2].args[0]
+            # import ipdb; ipdb.set_trace()
             for _ in xrange(length):
                 self.add_symbol_history.append(self.last_p_qemu-1)
 
@@ -1164,6 +1172,9 @@ class Tracer(object):
                 self.exploit_addr = state.ip.args[0]
             self.exploit_constraints = state.inspect.added_constraints
 
+    def _hook_buffer_write(self, state):
+        return
+
     def _record(self, state):
         if self.record_constraints:
             constraints, addr = state.inspect.added_constraints, state.ip
@@ -1171,9 +1182,11 @@ class Tracer(object):
                 if not c in self.constraints_history:
                     self.constraints_history[c] = []
                 if addr.symbolic:
-                    self.constraints_history[c].append(addr)
+                    self.constraints_history[c].append((addr,
+                        self.bb_cnt))
                 else:
-                    self.constraints_history[c].append(addr.args[0])
+                    self.constraints_history[c].append((addr.args[0],
+                        self.bb_cnt))
 
     def _hook_symbolic_variable(self, state):
         l.info('%d %s' % (self.last_p_qemu-1,
