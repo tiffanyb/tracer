@@ -18,7 +18,7 @@ from simuvex import s_cc
 import logging
 
 l = logging.getLogger("tracer.Tracer")
-#l.setLevel('DEBUG')
+l.setLevel('DEBUG')
 # global writable attribute used for specifying cache procedures
 GlobalCacheManager = None
 
@@ -41,6 +41,9 @@ class TracerDynamicTraceOOBError(Exception):
     pass
 
 class TracerTimeout(Exception):
+    pass
+
+class TracerDiscrepency(Exception):
     pass
 
 class Tracer(object):
@@ -234,6 +237,8 @@ class Tracer(object):
         self.exploit_constraints = None
 
         self.add_symbol_history = []
+        self.input_symbols = []
+        self._ignore_variables = []
 
     def _current_path(self, pg):
         if len(pg.active) == 1:
@@ -341,9 +346,10 @@ class Tracer(object):
                 # SE must stop for system calls
                 # elif current.previous_run is not None and \
                         # getattr(current.previous_run, 'IS_SYSCALL', None):
-                elif current.previous_run is not None and (
-                        'SYSCALL' in current.previous_run.description
-                        or 'syscall' in current.previous_run.description):
+                elif current.previous_run is not None and \
+                        not 'STOP_SYSCALL' in current.previous_run.description and \
+                        ('SYSCALL' in current.previous_run.description or
+                        'syscall' in current.previous_run.description):
                     # And we skip the system call
                     self.last_p_se += 1
                 else:
@@ -477,7 +483,7 @@ class Tracer(object):
         if not self.path_group.active[0].state.se.satisfiable():
             l.warning("detected small discrepency between qemu and angr, "
                     "attempting to fix known cases")
-            import ipdb; ipdb.set_trace()
+            raise TracerDiscrepency
             # did our missed branch try to go back to a rep?
             target = self.path_group.missed[0].addr
             if self._p.arch.name == 'X86' or self._p.arch.name == 'AMD64':
@@ -936,15 +942,15 @@ class Tracer(object):
             # import ipdb; ipdb.set_trace()
             for b in self.input:
                 v = stdin.read_from(1)
-                b_bvv = entry_state.se.BVV(b)
-                c = v == b_bvv
-                # add the constraint for reconstraining later
-                self.variable_map[list(v.variables)[0]] = c
-                self.preconstraints.append(c)
-                self.input_preconstraints.append(c)
-                if so.REPLACEMENT_SOLVER in entry_state.options:
-                    entry_state.se._solver.add_replacement(v, b_bvv, invalidate_cache=False)
-
+                if len([ i for i in self._ignore_variables if i is v ]) == 0:
+                    b_bvv = entry_state.se.BVV(b)
+                    c = v == b_bvv
+                    # add the constraint for reconstraining later
+                    self.variable_map[list(v.variables)[0]] = c
+                    self.preconstraints.append(c)
+                    self.input_preconstraints.append(c)
+                    if so.REPLACEMENT_SOLVER in entry_state.options:
+                        entry_state.se._solver.add_replacement(v, b_bvv, invalidate_cache=False)
             stdin.seek(0)
 
         if repair_entry_state_opts:
@@ -1160,6 +1166,7 @@ class Tracer(object):
             # import ipdb; ipdb.set_trace()
             for _ in xrange(length):
                 self.add_symbol_history.append(self.last_p_qemu-1)
+            l.info('Receive input')
 
     def check_stack(self, state):
         l.debug("checking %s" % state.ip)
@@ -1192,6 +1199,15 @@ class Tracer(object):
         l.info('%d %s' % (self.last_p_qemu-1,
             state.inspect.symbolic_name))
         self.input_symbols.append(state.inspect.symbolic_expr)
+        # I need the actual input symbols, so I put symbol constraints
+        # here instead of syscall
+        try:
+            c = state.inspect.symbolic_expr == self.input_mapping[self.last_p_qemu-1]
+            # state.add_constraints(c)
+            l.info('new constraints %s', c)
+        except Exception:
+            pass
+
         #if not self.last_p_qemu - 1 in self.add_symbol_history:
         #    self.add_symbol_history.append(self.last_p_qemu-1)
 
