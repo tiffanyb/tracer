@@ -238,7 +238,7 @@ class Tracer(object):
 
         self.add_symbol_history = []
         self.input_symbols = []
-        self._ignore_variables = []
+        self._new_preconstraints = []
 
     def _current_path(self, pg):
         if len(pg.active) == 1:
@@ -906,6 +906,45 @@ class Tracer(object):
 
 # SYMBOLIC TRACING
 
+    def _flat_args(self, v):
+        if v.depth == 0:
+            return []
+        elif v.depth == 1:
+            return [v]
+        else:
+            return [i for a in v.args for i in self._flat_args(a)]
+
+    def _index_to_symbol(self, constraints):
+        result = {}
+        for c in constraints:
+            args = self._flat_args(c)
+            for a in args:
+                i = self._index_input_symbol(a)
+                if i is not None:
+                    if i in result:
+                        assert result[i] is a
+                    else:
+                        result[i] = a
+        return result
+
+    def _index_input_symbol(self, v):
+        try:
+            words = v.__repr__().split('_')
+            if words[1] == '/dev/stdin':
+                return int(words[3], 16)
+            else:
+                return None
+        except Exception:
+            return None
+
+    def _ignore(self, v, index_symbol, mapping):
+        index = self._index_input_symbol(v)
+        if index in index_symbol:
+            mapping[index_symbol[index]] = v
+            return True
+        else:
+            return False
+
     def _preconstrain_state(self, entry_state):
         '''
         preconstrain the entry state to the input
@@ -939,10 +978,12 @@ class Tracer(object):
 
         else:  # not a PoV, just raw input
             stdin = entry_state.posix.get_file(0)
-            # import ipdb; ipdb.set_trace()
+            # mapping: new symbol -> old symbol
+            mapping = {}
+            index_symbol = self._index_to_symbol(self._new_preconstraints)
             for b in self.input:
                 v = stdin.read_from(1)
-                if len([ i for i in self._ignore_variables if i is v ]) == 0:
+                if not self._ignore(v, index_symbol, mapping):
                     b_bvv = entry_state.se.BVV(b)
                     c = v == b_bvv
                     # add the constraint for reconstraining later
@@ -951,6 +992,18 @@ class Tracer(object):
                     self.input_preconstraints.append(c)
                     if so.REPLACEMENT_SOLVER in entry_state.options:
                         entry_state.se._solver.add_replacement(v, b_bvv, invalidate_cache=False)
+            # below is very very hacky. because
+            # self._new_preconstraints
+            # are only used for ricochet tweaking, and when teaking we
+            # will read all inputs together, we will add the new
+            # constraints here, because at this point all new input
+            # symbols have been already added into the trace
+            for c in self._new_preconstraints:
+                new_c = c
+                for old, new in mapping.items():
+                    new_c = new_c.replace(old, new)
+                entry_state.add_constraints(new_c)
+
             stdin.seek(0)
 
         if repair_entry_state_opts:
