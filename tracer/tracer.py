@@ -296,8 +296,7 @@ class Tracer(object):
                         raise TracerMisfollowError
 
             # maintain the predecessors list
-            self.predecessors.append(current)
-            self.predecessors.pop(0)
+            self.push_predecessor(current)
 
             # Basic block's max size in angr is greater than the one in Qemu
             # We follow the one in Qemu
@@ -343,10 +342,11 @@ class Tracer(object):
             # check to see if we reached a deadend
             if self.bb_cnt >= len(self.trace) and self.crash_mode:
                 # if we're in crash mode let's populate the crashed stash
-                    self.simgr.step()
-                    self.crash_type = QEMU_CRASH
-                    self.simgr.stash(from_stash='active', to_stash='crashed')
-                    return self.simgr
+                self.push_predecessor(self.simgr.one_active)
+                self.simgr.step()
+                self.crash_type = QEMU_CRASH
+                self.simgr.stash(from_stash='active', to_stash='crashed')
+                return self.simgr
 
         # if we stepped to a point where there are no active paths,
         # return the simgr
@@ -1067,12 +1067,12 @@ class Tracer(object):
         # then we step again up to the crashing instruction
         p_block = state.project.factory.block(state.addr, backup_state=state)
         inst_cnt = len(p_block.instruction_addrs)
-        insts = 0 if inst_cnt == 0 else inst_cnt - 1
-        succs = state.project.factory.successors(state, num_inst=insts).flat_successors
-        if len(succs) > 0:
-            if len(succs) > 1:
-                succs = [s for s in succs if s.se.satisfiable()]
-            state = succs[0]
+        if inst_cnt > 1:
+            succs = state.project.factory.successors(state, num_inst=inst_cnt - 1).flat_successors
+            if len(succs) > 0:
+                if len(succs) > 1:
+                    succs = [s for s in succs if s.se.satisfiable()]
+                state = succs[0]
 
         # remove the preconstraints
         l.debug("removing preconstraints")
@@ -1089,3 +1089,7 @@ class Tracer(object):
         succs = state.project.factory.successors(state)
         successors = succs.flat_successors + succs.unconstrained_successors
         return successors[0]
+
+    def push_predecessor(self, state):
+        self.predecessors.append(state)
+        self.predecessors.pop(0)
