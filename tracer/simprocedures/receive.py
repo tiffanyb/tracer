@@ -9,8 +9,6 @@ def cache_pass(_):
 # called when caching the state
 cache_hook = cache_pass
 
-l.setLevel('DEBUG')
-
 class FixedInReceive(receive):
     # pylint:disable=arguments-differ
     """
@@ -19,8 +17,6 @@ class FixedInReceive(receive):
 
     def run(self, fd, buf, count, rx_bytes):
         l.debug('%x' % buf.args[0])
-        # if buf.args[0] == 0xbaaaafad:
-            # import ipdb; ipdb.set_trace()
         if self.state.se.any_int(self.state.posix.files[0].pos) == 0:
             if cache_hook is not None:
                 cache_hook(self.state)

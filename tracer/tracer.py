@@ -577,7 +577,6 @@ class Tracer(object):
 
             # when the only path with symbolic ip, the path will be
             # catergorized to unconstrained. We need to save it out.
-            # if self.bb_cnt >= 7081: import ipdb; ipdb.set_trace()
             if len(branches.active) == 0 and \
                     'unconstrained' in branches.stashes and \
                     len(branches.unconstrained) > 0 and \
@@ -1216,7 +1215,6 @@ class Tracer(object):
         if syscall_addr == 0xa000018 or syscall_addr == 0xb000018:
             args = s_cc.SyscallCC['X86']['CGC'](self._p.arch).get_args(state, 4)
             length = args[2].args[0]
-            # import ipdb; ipdb.set_trace()
             for _ in xrange(length):
                 self.add_symbol_history.append(self.last_p_qemu-1)
             l.info('Receive input')
