@@ -16,6 +16,7 @@ from angr import sim_options as so
 import logging
 
 l = logging.getLogger("tracer.Tracer")
+l.setLevel('DEBUG')
 # global writable attribute used for specifying cache procedures
 GlobalCacheManager = None
 
@@ -503,6 +504,11 @@ class Tracer(object):
                     last_block = self.trace[self.bb_cnt - 1]
                     l.info("crash occured in basic block %x", last_block)
 
+                p_block = project.factory.block(self.previous.addr, backup_state=self.previous)
+                inst_cnt = len(p_block.instruction_addrs)
+                insts = 0 if inst_cnt == 0 else inst_cnt - 1
+                previous = self.previous
+
                 # time to recover the crashing state
 
                 # before we step through and collect the actions we have to set
@@ -523,47 +529,51 @@ class Tracer(object):
                     'address_concretization',
                     angr.BP_AFTER,
                     action=self._grab_concretization_results)
-
+                
                 # step to the end of the crashing basic block,
                 # to capture its actions with those breakpoints
-                project.factory.successors(self.previous)
-
+                try:
+                    project.factory.successors(self.previous)
+                except Exception:
+                    project.factory.successors(self.previous, num_inst=insts)
+ 
                 # Add the constraints from concretized addrs back
                 for var, concrete_vals in self._address_concretization:
                     if len(concrete_vals) > 0:
                         l.debug("constraining addr to be %#x", concrete_vals[0])
                         self.previous.add_constraints(var == concrete_vals[0])
-
+ 
                 # then we step again up to the crashing instruction
-                p_block = project.factory.block(self.previous.addr, backup_state=self.previous)
-                inst_cnt = len(p_block.instruction_addrs)
-                insts = 0 if inst_cnt == 0 else inst_cnt - 1
                 succs = project.factory.successors(self.previous, num_inst=insts).flat_successors
                 if len(succs) > 0:
                     if len(succs) > 1:
                         succs = [s for s in succs if s.se.satisfiable()]
                     self.previous = succs[0]
-
+ 
                 # remove the preconstraints
                 l.debug("removing preconstraints")
                 self.remove_preconstraints(self.previous)
-
+ 
                 l.debug("reconstraining... ")
                 self.reconstrain(self.previous)
-
+ 
                 l.debug("final step...")
-                succs = project.factory.successors(self.previous)
-
+                
                 # now remove our breakpoints since other people might not want them
                 self.previous.inspect.remove_breakpoint("address_concretization", bp1)
                 self.previous.inspect.remove_breakpoint("address_concretization", bp2)
-
-                successors = succs.flat_successors + succs.unconstrained_successors
-                state = successors[0]
-
+ 
                 l.debug("tracing done!")
-                self.final_state = state
-                return (self.previous, state)
+                try:
+                    succs = project.factory.successors(self.previous)
+                    successors = succs.flat_successors + succs.unconstrained_successors
+                    state = successors[0]
+                    previous = self.previous
+                except Exception:
+                    state = self.previous
+                self.final_state = self.previous
+                
+                return (previous, state)
 
         # this is a concrete trace, there should only be ONE path
         all_paths = branches.active + branches.deadended
@@ -720,7 +730,7 @@ class Tracer(object):
         accumulate a basic block trace using qemu
         '''
 
-        lname = tempfile.mktemp(dir="/dev/shm/", prefix="tracer-log-")
+        lname = tempfile.mktemp(dir="tmp/", prefix="tracer-log-")
         args = [self.tracer_qemu_path]
 
         if self.seed is not None:
@@ -728,7 +738,7 @@ class Tracer(object):
 
         # if the binary is CGC we'll also take this oppurtunity to read in the magic page
         if self.os == 'cgc':
-            mname = tempfile.mktemp(dir="/dev/shm/", prefix="tracer-magic-")
+            mname = tempfile.mktemp(dir="tmp/", prefix="tracer-magic-")
             args += ["-magicdump", mname]
 
         args += ["-d", "exec", "-D", lname]
@@ -1011,6 +1021,10 @@ class Tracer(object):
 
         # preconstrain flag page
         self._preconstrain_flag_page(entry_state, self.cgc_flag_bytes)
+        try:
+            entry_state.memory.map_region(0x4347c000, 0x1000, 3)
+        except Exception:
+            pass
         entry_state.memory.store(0x4347c000, claripy.Concat(*self.cgc_flag_bytes))
 
         if self._dump_syscall:

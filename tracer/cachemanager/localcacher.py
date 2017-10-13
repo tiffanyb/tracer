@@ -17,7 +17,7 @@ class LocalCacheManager(CacheManager):
         super(LocalCacheManager, self).set_tracer(tracer)
 
         binhash = hashlib.md5(open(self.tracer.binary).read()).hexdigest()
-        self._cache_file = os.path.join("/tmp", \
+        self._cache_file = os.path.join("tmp", \
                 "%s-%s.tcache" % (os.path.basename(self.tracer.binary), binhash))
 
     def cache_lookup(self):
